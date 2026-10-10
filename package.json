@@ -1,0 +1,25 @@
+{
+  "name": "canvas-organizer-pi",
+  "version": "0.1.0",
+  "description": "A local-first Canvas LMS and Google Calendar assistant for Pi.",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hrishiman-dev/canvas-organizer-pi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hrishiman-dev/canvas-organizer-pi/issues"
+  },
+  "homepage": "https://github.com/hrishiman-dev/canvas-organizer-pi#readme",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "remote": "node src/remote-server.mjs",
+    "check": "node --check src/remote-server.mjs && node --check remote/app.js",
+    "test": "node --experimental-strip-types --test tests/core.test.ts tests/remote-server.test.mjs"
+  },
+  "keywords": ["canvas-lms", "google-calendar", "pi-agent", "student", "local-first"]
+}

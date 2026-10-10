@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0b0c10">
+    <meta name="description" content="Private remote interface for Canvas Organizer">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/app.css?v=0.1.0">
+    <title>Organizer</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="identity">
+          <div class="mark" aria-hidden="true">O</div>
+          <div>
+            <h1>Organizer</h1>
+            <p id="connection-label">Connecting…</p>
+          </div>
+        </div>
+        <button id="new-button" class="ghost-button" type="button" aria-label="Start a new conversation">New</button>
+      </header>
+
+      <section id="messages" class="messages" aria-live="polite" aria-label="Conversation">
+        <div id="empty-state" class="empty-state">
+          <h2>What do you need?</h2>
+          <p>Ask about Canvas, your schedule, or add something to your calendar.</p>
+          <div class="suggestions" aria-label="Suggestions">
+            <button type="button" data-prompt="What do I need to do today?">Today’s work</button>
+            <button type="button" data-prompt="Summarize recent Canvas announcements.">Announcements</button>
+            <button type="button" data-prompt="What is on my calendar tomorrow?">Tomorrow</button>
+          </div>
+        </div>
+      </section>
+
+      <div id="activity" class="activity" role="status" aria-live="polite" hidden></div>
+
+      <form id="composer" class="composer">
+        <label class="sr-only" for="prompt">Message Organizer</label>
+        <textarea id="prompt" name="prompt" rows="1" maxlength="8000" placeholder="Message Organizer…" enterkeyhint="send"></textarea>
+        <button id="send-button" class="send-button" type="submit" aria-label="Send message">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
+        </button>
+        <button id="stop-button" class="stop-button" type="button" aria-label="Stop response" hidden>
+          <span></span>
+        </button>
+      </form>
+    </main>
+
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <form method="dialog">
+        <p class="dialog-kicker">Confirmation required</p>
+        <h2 id="dialog-title">Confirm action</h2>
+        <pre id="dialog-message"></pre>
+        <div class="dialog-actions">
+          <button id="dialog-cancel" value="cancel" class="ghost-button">Cancel</button>
+          <button id="dialog-confirm" value="confirm" class="confirm-button">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script src="/app.js?v=0.1.0" type="module"></script>
+  </body>
+</html>

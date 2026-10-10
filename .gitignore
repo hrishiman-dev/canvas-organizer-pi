@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.organizer/
+node_modules/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
