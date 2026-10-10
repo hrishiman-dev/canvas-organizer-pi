@@ -113,6 +113,14 @@ GOOGLE_CLIENT_ID=...apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=...
 ```
 
+Start Pi from the repository root, then authorize the Google account whose calendar you want to manage:
+
+```text
+/organizer-google-login
+```
+
+Complete the browser consent screen. The organizer saves the resulting refresh token outside the repository; do not copy it into `.env` or commit it.
+
 The project requests only the `calendar.events` scope. The Google refresh token is stored outside this repo under your Windows AppData directory.
 
 Google normally expires refresh tokens after seven days while an External app remains in **Testing**. For persistent personal use, review Google's current OAuth publishing requirements before changing the app to **In production**. Google may show an “unverified app” warning or require verification depending on the scopes and audience; do not add users you do not trust.
