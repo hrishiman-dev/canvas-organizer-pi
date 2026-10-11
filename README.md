@@ -219,7 +219,7 @@ The organizer includes a small mobile-friendly web interface that talks to Pi th
 
    Tailscale prints the private HTTPS address. Open that address from any signed-in device. On iPhone, use Safari's **Add to Home Screen** for an app-like shortcut.
 
-The web interface supports streaming replies, queued follow-up prompts, automatic history resynchronization, conversation reset/stop, and durable Pi extension confirmations across brief reconnects. Calendar changes still require an explicit confirmation from the remote interface.
+The web interface supports streaming replies, queued follow-up prompts, automatic history resynchronization, conversation reset/stop, and durable Pi extension confirmations across reconnects. It actively reconnects after a phone or laptop wakes from sleep, shows delivery state beneath outgoing messages, and preserves an unsent draft. If a reply ever appears stuck, use **Sync** in the header; syncing never resends an accepted prompt, so it cannot duplicate a calendar request. Calendar changes still require an explicit confirmation from the remote interface.
 
 To launch the bridge without a visible terminal, run `scripts\start-remote-hidden.vbs` from its location in the repository. If you want it at sign-in, create a shortcut to that file in `shell:startup`; do not copy the VBS file out of the repository because it resolves the launcher relative to its own location.
 

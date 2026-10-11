@@ -12,6 +12,7 @@ loadEnv(join(projectRoot, ".env"));
 
 const host = "127.0.0.1";
 const port = boundedPort(process.env.ORGANIZER_REMOTE_PORT || "8787");
+const heartbeatMs = boundedInterval(process.env.ORGANIZER_HEARTBEAT_MS || "15000", 100, 60_000);
 const clients = new Map();
 const pendingUiRequests = new Map();
 const outboundQueue = [];
@@ -38,6 +39,12 @@ function loadEnv(path) {
 function boundedPort(value) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 65535) throw new Error("ORGANIZER_REMOTE_PORT must be between 1024 and 65535.");
+  return parsed;
+}
+
+function boundedInterval(value, minimum, maximum) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) return 15_000;
   return parsed;
 }
 
@@ -202,7 +209,7 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${host}:${port}`);
   try {
     if (request.method === "GET" && url.pathname === "/api/health") {
-      return json(response, 200, { ok: true, pi: { state: piState, error: piError, queued: outboundQueue.length }, port });
+      return json(response, 200, { ok: true, pi: { state: piState, error: piError, queued: outboundQueue.length }, clients: clients.size, port });
     }
     if (request.method === "GET" && url.pathname === "/api/events") {
       response.writeHead(200, securityHeaders({
@@ -218,8 +225,12 @@ const server = createServer(async (request, response) => {
         response.write(`data: ${JSON.stringify(pending)}\n\n`);
       }
       const heartbeat = setInterval(() => {
-        try { response.write(": keepalive\n\n"); } catch { clearInterval(heartbeat); }
-      }, 15_000);
+        try {
+          response.write(`data: ${JSON.stringify({ type: "heartbeat", state: piState, at: Date.now() })}\n\n`);
+        } catch {
+          clearInterval(heartbeat);
+        }
+      }, heartbeatMs);
       heartbeat.unref();
       request.once("close", () => {
         clearInterval(heartbeat);
@@ -232,9 +243,19 @@ const server = createServer(async (request, response) => {
       const body = await readJson(request);
       const message = typeof body.message === "string" ? body.message.trim() : "";
       if (!message || message.length > 8_000) return json(response, 400, { error: "Message must contain 1–8,000 characters." });
-      const requestId = `prompt-${randomUUID()}`;
+      const clientId = typeof body.clientId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(body.clientId) ? body.clientId : randomUUID();
+      const requestId = `prompt-${clientId}`;
       sendToPi({ id: requestId, type: "prompt", message, streamingBehavior: "followUp" });
+      console.log(`[remote] Accepted prompt ${requestId}; state=${piState}.`);
       return json(response, 202, { accepted: true, requestId });
+    }
+    if (request.method === "POST" && url.pathname === "/api/sync") {
+      if (piProcess && !piProcess.killed) {
+        const requestId = `sync-${randomUUID()}`;
+        sendToPi({ id: requestId, type: "get_messages" });
+        return json(response, 202, { accepted: true, requestId, state: piState });
+      }
+      return json(response, 200, { accepted: false, state: piState });
     }
     if (request.method === "POST" && url.pathname === "/api/ui-response") {
       const body = await readJson(request);

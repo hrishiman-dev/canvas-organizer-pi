@@ -4,6 +4,7 @@ const promptInput = document.querySelector("#prompt");
 const sendButton = document.querySelector("#send-button");
 const stopButton = document.querySelector("#stop-button");
 const newButton = document.querySelector("#new-button");
+const syncButton = document.querySelector("#sync-button");
 const activity = document.querySelector("#activity");
 const connectionLabel = document.querySelector("#connection-label");
 const dialog = document.querySelector("#confirm-dialog");
@@ -16,8 +17,16 @@ let currentDialog = null;
 let working = false;
 let posting = false;
 let toastTimer = null;
-let reconnectToastShown = false;
+let eventSource = null;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+let lastEventAt = 0;
+let hiddenAt = 0;
+let lastResumeAt = 0;
 const pendingPrompts = new Map();
+const HEARTBEAT_STALE_MS = 40_000;
+const BACKGROUND_RECONNECT_MS = 10_000;
+const DRAFT_KEY = "organizer-remote-draft";
 
 function scrollToBottom() {
   messages.scrollTop = messages.scrollHeight;
@@ -53,9 +62,44 @@ function appendMessage(role, text = "", options = {}) {
   bubble.className = "bubble";
   bubble.textContent = text;
   wrapper.append(bubble);
+  if (options.status) {
+    const status = document.createElement("div");
+    status.className = "message-status";
+    status.textContent = options.status;
+    wrapper.append(status);
+  }
   messages.append(wrapper);
   scrollToBottom();
   return bubble;
+}
+
+function setPendingStatus(id, label, options = {}) {
+  const wrapper = messages.querySelector(`[data-pending-id="${CSS.escape(id)}"]`);
+  if (!wrapper) return;
+  wrapper.classList.toggle("failed", Boolean(options.failed));
+  wrapper.classList.toggle("accepted", Boolean(options.accepted));
+  let status = wrapper.querySelector(".message-status");
+  if (!status) {
+    status = document.createElement("div");
+    status.className = "message-status";
+    wrapper.append(status);
+  }
+  status.replaceChildren(document.createTextNode(label));
+  if (options.retry) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "inline-action";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => retryPrompt(id));
+    status.append(" · ", retry);
+  }
+}
+
+function setConnection(mode, label) {
+  document.body.classList.toggle("is-offline", mode === "offline");
+  document.body.classList.toggle("is-connecting", mode === "connecting");
+  document.body.dataset.connection = mode;
+  connectionLabel.textContent = label;
 }
 
 function setWorking(value, label = value ? "Thinking…" : "") {
@@ -80,6 +124,7 @@ async function post(path, body = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    cache: "no-store",
   });
   const raw = await response.text();
   let value = {};
@@ -92,24 +137,55 @@ async function sendPrompt(text) {
   const message = text.trim();
   if (!message || posting) return;
   const pendingId = crypto.randomUUID();
-  pendingPrompts.set(pendingId, message);
-  appendMessage("user", message, { pendingId });
+  const requestId = `prompt-${pendingId}`;
+  pendingPrompts.set(pendingId, { text: message, requestId, status: "Sending…", acceptedAt: 0, syncRequested: false });
+  appendMessage("user", message, { pendingId, status: "Sending…" });
   promptInput.value = "";
+  saveDraft();
   resizeComposer();
   posting = true;
   setWorking(true, working ? "Queueing your message…" : "Starting Pi…");
   try {
-    await post("/api/prompt", { message });
+    const result = await post("/api/prompt", { message, clientId: pendingId });
+    const pending = pendingPrompts.get(pendingId);
+    if (pending) {
+      pending.requestId = result.requestId || requestId;
+      pending.status = "Accepted — waiting for Pi…";
+      pending.acceptedAt = Date.now();
+      setPendingStatus(pendingId, pending.status, { accepted: true });
+    }
   } catch (error) {
-    pendingPrompts.delete(pendingId);
-    messages.querySelector(`[data-pending-id="${CSS.escape(pendingId)}"]`)?.remove();
+    const pending = pendingPrompts.get(pendingId);
+    if (pending) pending.status = "Delivery not confirmed — tap Sync";
+    setPendingStatus(pendingId, "Delivery not confirmed — tap Sync", { failed: true });
     setWorking(false);
-    appendMessage("assistant", `Could not send that message: ${error.message}`);
+    showToast(`Could not confirm delivery: ${error.message}`);
   } finally {
     posting = false;
     resizeComposer();
     promptInput.focus();
   }
+}
+
+function retryPrompt(id) {
+  const pending = pendingPrompts.get(id);
+  if (!pending) return;
+  pendingPrompts.delete(id);
+  messages.querySelector(`[data-pending-id="${CSS.escape(id)}"]`)?.remove();
+  sendPrompt(pending.text);
+}
+
+function saveDraft() {
+  try {
+    if (promptInput.value) localStorage.setItem(DRAFT_KEY, promptInput.value);
+    else localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    // Storage is optional; the composer still works normally.
+  }
+}
+
+function restoreDraft() {
+  try { promptInput.value = localStorage.getItem(DRAFT_KEY) || ""; } catch { /* Storage is optional. */ }
 }
 
 function resizeComposer() {
@@ -128,10 +204,12 @@ function extractText(message) {
 
 function renderHistory(records) {
   const useful = (records || []).filter((message) => message?.role === "user" || message?.role === "assistant");
-  const historyUserTexts = useful.filter((message) => message.role === "user").map(extractText);
-  if (!working) {
-    for (const [id, text] of pendingPrompts) {
-      if (historyUserTexts.includes(text)) pendingPrompts.delete(id);
+  const unmatchedUserTexts = useful.filter((message) => message.role === "user").map(extractText);
+  for (const [id, pending] of pendingPrompts) {
+    const index = unmatchedUserTexts.indexOf(pending.text);
+    if (index >= 0) {
+      pendingPrompts.delete(id);
+      unmatchedUserTexts.splice(index, 1);
     }
   }
   messages.replaceChildren();
@@ -140,7 +218,10 @@ function renderHistory(records) {
     const text = extractText(message);
     if (text) appendMessage(message.role, text);
   }
-  for (const [id, text] of pendingPrompts) appendMessage("user", text, { pendingId: id });
+  for (const [id, pending] of pendingPrompts) {
+    appendMessage("user", pending.text, { pendingId: id, status: pending.status });
+    setPendingStatus(id, pending.status, { accepted: pending.acceptedAt > 0, failed: pending.status.includes("not confirmed") });
+  }
   if (!messages.children.length) showEmptyState();
   scrollToBottom();
 }
@@ -171,11 +252,21 @@ async function respondToDialog(confirmed) {
   }
 }
 
+function pendingForRecord(record) {
+  for (const [id, pending] of pendingPrompts) {
+    if (pending.requestId === record.id) return { id, pending };
+  }
+  return null;
+}
+
 function handleRecord(record) {
+  if (record.type === "heartbeat") {
+    if (document.body.dataset.connection !== "connected") setConnection("connected", "Private connection ready");
+    return;
+  }
   if (record.type === "bridge_status") {
-    document.body.classList.remove("is-offline");
     const labels = { stopped: "Pi starts when you send a message", starting: "Starting Pi…", ready: "Private connection ready", working: "Pi is working…", error: "Pi needs setup" };
-    connectionLabel.textContent = labels[record.state] || record.state;
+    setConnection(record.state === "error" ? "offline" : "connected", labels[record.state] || record.state);
     if (record.state === "working") setWorking(true, "Thinking…");
     if (record.state === "ready" || record.state === "stopped" || record.state === "error") setWorking(false);
     if (record.error) showToast(record.error);
@@ -183,6 +274,12 @@ function handleRecord(record) {
   }
   if (record.type === "agent_start") {
     assistantBubble = null;
+    for (const [id, pending] of pendingPrompts) {
+      if (pending.acceptedAt) {
+        pending.status = "Pi is working…";
+        setPendingStatus(id, pending.status, { accepted: true });
+      }
+    }
     setWorking(true, "Thinking…");
     return;
   }
@@ -227,12 +324,25 @@ function handleRecord(record) {
     return;
   }
   if (record.type === "response" && record.command === "prompt") {
+    const match = pendingForRecord(record);
     if (!record.success) {
       setWorking(false);
+      if (match) {
+        match.pending.status = "Pi rejected this message";
+        setPendingStatus(match.id, match.pending.status, { failed: true, retry: true });
+      }
       showToast(record.error || "Pi rejected the message.");
     } else if (record.data?.disposition === "handled") {
+      if (match) {
+        match.pending.status = "Delivered";
+        setPendingStatus(match.id, match.pending.status, { accepted: true });
+      }
       setWorking(false);
     } else if (record.data?.disposition === "queued") {
+      if (match) {
+        match.pending.status = "Queued";
+        setPendingStatus(match.id, match.pending.status, { accepted: true });
+      }
       setWorking(true, "Message queued — Pi is finishing the current response…");
       showToast("Message queued.");
     }
@@ -252,7 +362,10 @@ composer.addEventListener("submit", (event) => {
   sendPrompt(promptInput.value);
 });
 
-promptInput.addEventListener("input", resizeComposer);
+promptInput.addEventListener("input", () => {
+  saveDraft();
+  resizeComposer();
+});
 promptInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
@@ -277,23 +390,104 @@ dialog.addEventListener("close", () => {
   if (dialog.returnValue !== "resolved") respondToDialog(dialog.returnValue === "confirm");
 });
 
-const events = new EventSource("/api/events");
-events.onopen = () => {
-  document.body.classList.remove("is-offline");
-  reconnectToastShown = false;
-};
-events.onmessage = (event) => {
-  try { handleRecord(JSON.parse(event.data)); } catch { showToast("Received an unreadable Pi update."); }
-};
-events.onerror = () => {
-  document.body.classList.add("is-offline");
-  connectionLabel.textContent = "Reconnecting…";
-  if (!reconnectToastShown) {
-    reconnectToastShown = true;
-    showToast("Connection interrupted. Your conversation will resync automatically.");
-  }
-};
+async function requestSync() {
+  try { await post("/api/sync"); } catch { /* Reopening the event stream remains the fallback. */ }
+}
 
+function scheduleReconnect() {
+  if (reconnectTimer || document.visibilityState === "hidden") return;
+  const delay = Math.min(1_000 * (2 ** reconnectAttempt), 10_000);
+  reconnectAttempt += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectEvents("retry");
+  }, delay);
+}
+
+function connectEvents(reason = "connect") {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  if (eventSource) eventSource.close();
+  setConnection("connecting", reason === "manual" ? "Syncing conversation…" : "Connecting…");
+  const source = new EventSource(`/api/events?connection=${Date.now()}`);
+  eventSource = source;
+  source.onopen = () => {
+    if (source !== eventSource) return;
+    lastEventAt = Date.now();
+    reconnectAttempt = 0;
+    setConnection("connected", "Private connection ready");
+  };
+  source.onmessage = (event) => {
+    if (source !== eventSource) return;
+    lastEventAt = Date.now();
+    try { handleRecord(JSON.parse(event.data)); } catch { showToast("Received an unreadable Pi update."); }
+  };
+  source.onerror = () => {
+    if (source !== eventSource) return;
+    source.close();
+    setConnection("offline", navigator.onLine ? "Reconnecting…" : "Device is offline");
+    scheduleReconnect();
+  };
+}
+
+async function resumeConnection(reason = "resume", force = false) {
+  const now = Date.now();
+  if (!force && now - lastResumeAt < 1_500) return;
+  lastResumeAt = now;
+  const stale = !lastEventAt || now - lastEventAt > HEARTBEAT_STALE_MS;
+  if (force || stale || !eventSource || eventSource.readyState !== EventSource.OPEN) {
+    connectEvents(reason);
+    return;
+  }
+  await requestSync();
+}
+
+syncButton.addEventListener("click", async () => {
+  syncButton.disabled = true;
+  await resumeConnection("manual", true);
+  setTimeout(() => { syncButton.disabled = false; }, 1_000);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    hiddenAt = Date.now();
+    return;
+  }
+  const slept = hiddenAt && Date.now() - hiddenAt > BACKGROUND_RECONNECT_MS;
+  hiddenAt = 0;
+  resumeConnection("resume", slept);
+});
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) resumeConnection("restore", true);
+});
+window.addEventListener("focus", () => resumeConnection("focus"));
+window.addEventListener("online", () => resumeConnection("online", true));
+window.addEventListener("offline", () => setConnection("offline", "Device is offline"));
+
+setInterval(() => {
+  if (document.visibilityState === "visible" && lastEventAt && Date.now() - lastEventAt > HEARTBEAT_STALE_MS) {
+    resumeConnection("stale", true);
+  }
+  const now = Date.now();
+  for (const [id, pending] of pendingPrompts) {
+    if (!pending.acceptedAt) continue;
+    const age = now - pending.acceptedAt;
+    if (age > 90_000) {
+      pending.status = "Still waiting — tap Sync";
+      setPendingStatus(id, pending.status, { accepted: true });
+    } else if (age > 15_000 && !working) {
+      pending.status = "Waiting for Pi…";
+      setPendingStatus(id, pending.status, { accepted: true });
+    }
+    if (age > 30_000 && !pending.syncRequested) {
+      pending.syncRequested = true;
+      requestSync();
+    }
+  }
+}, 5_000);
+
+restoreDraft();
 bindSuggestions();
 resizeComposer();
+connectEvents();
 promptInput.focus();

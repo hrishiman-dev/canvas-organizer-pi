@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0b0c10">
     <meta name="description" content="Private remote interface for Canvas Organizer">
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/app.css?v=0.1.0">
+    <link rel="stylesheet" href="/app.css?v=0.1.1">
     <title>Organizer</title>
   </head>
   <body>
@@ -16,10 +16,13 @@
           <div class="mark" aria-hidden="true">O</div>
           <div>
             <h1>Organizer</h1>
-            <p id="connection-label">Connecting…</p>
+            <p id="connection-label" aria-live="polite">Connecting…</p>
           </div>
         </div>
-        <button id="new-button" class="ghost-button" type="button" aria-label="Start a new conversation">New</button>
+        <div class="header-actions">
+          <button id="sync-button" class="ghost-button compact-button" type="button" aria-label="Reconnect and sync conversation">Sync</button>
+          <button id="new-button" class="ghost-button compact-button" type="button" aria-label="Start a new conversation">New</button>
+        </div>
       </header>
 
       <section id="messages" class="messages" aria-live="polite" aria-label="Conversation">
@@ -61,6 +64,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" hidden></div>
-    <script src="/app.js?v=0.1.0" type="module"></script>
+    <script src="/app.js?v=0.1.1" type="module"></script>
   </body>
 </html>
