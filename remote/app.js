@@ -45,7 +45,7 @@ function bindSuggestions() {
 function showEmptyState() {
   const welcome = document.createElement("div");
   welcome.className = "empty-state";
-  welcome.innerHTML = `<h2>What do you need?</h2><p>Ask about Canvas, your schedule, or add something to your calendar.</p><div class="suggestions" aria-label="Suggestions"><button type="button" data-prompt="What do I need to do today?">Today’s work</button><button type="button" data-prompt="Summarize recent Canvas announcements.">Announcements</button><button type="button" data-prompt="What is on my calendar tomorrow?">Tomorrow</button></div>`;
+  welcome.innerHTML = `<h2>What do you need?</h2><p>Ask about Canvas, Outlook, your schedule, or add something to your calendar.</p><div class="suggestions" aria-label="Suggestions"><button type="button" data-prompt="What do I need to do today?">Today’s work</button><button type="button" data-prompt="Summarize recent Canvas announcements.">Announcements</button><button type="button" data-prompt="Scan my recent Outlook email for important future events. Show candidates, but do not add anything without my confirmation.">Outlook events</button><button type="button" data-prompt="What is on my calendar tomorrow?">Tomorrow</button></div>`;
   messages.append(welcome);
   bindSuggestions();
 }

@@ -3,7 +3,7 @@
 [![CI](https://github.com/hrishiman-dev/canvas-organizer-pi/actions/workflows/ci.yml/badge.svg)](https://github.com/hrishiman-dev/canvas-organizer-pi/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A project-local Pi extension that turns Canvas and Google Calendar into agent tools. When personal Canvas tokens are blocked, it reuses a dedicated browser login to read Canvas's structured data (not fragile dashboard HTML), shows incomplete work and announcements, checks calendar conflicts, and adds, edits, or removes events after a confirmation.
+A project-local Pi extension that turns Canvas, read-only Outlook mail, and Google Calendar into agent tools. When personal Canvas tokens are blocked, it reuses a dedicated browser login to read Canvas's structured data (not fragile dashboard HTML), shows incomplete work and announcements, finds future-event candidates in recent mail, checks calendar conflicts, and adds, edits, or removes events after a confirmation.
 
 > [!IMPORTANT]
 > This is an independent community project. It is not affiliated with, endorsed by, or supported by Instructure, Google, Tailscale, Ollama, or the Pi project. Follow your school's acceptable-use and data-handling policies.
@@ -38,9 +38,11 @@ Edit `.env`, then start `pi` from the repository root. Pi discovers the project 
 - “Move my Friday study block to 7 PM.”
 - “Delete tomorrow's dentist appointment.”
 - “Summarize new Canvas announcements from the last week.”
+- “Scan my recent Outlook email for important future events.”
+- “Show that Outlook message and copy its meeting to Google Calendar.”
 - “Show every assignment and module in my chemistry course.”
 - Active courses, visible grades, recent announcements, assignments, and modules
-- `/today`, `/organizer-check`, `/organizer-canvas-login`, and `/organizer-google-login`
+- `/today`, `/organizer-check`, `/organizer-canvas-login`, `/organizer-google-login`, and `/organizer-outlook-login`
 
 The organizer does not submit assignments or send Canvas messages. An optional Windows task can refresh a daily briefing in the background at no cost.
 
@@ -127,7 +129,36 @@ Google normally expires refresh tokens after seven days while an External app re
 
 On your iPhone, either install Google Calendar and sign into the same account, or go to **Settings → Apps → Calendar → Calendar Accounts → Add Account → Google** and enable Calendars.
 
-## 3. Optional: run Pi with a free local model
+## 3. Connect Outlook mail (optional)
+
+Outlook access uses the official Microsoft Graph API with delegated, read-only `Mail.Read` permission. There is no Microsoft client secret and no paid cloud resource. The organizer stores only the resulting refresh token outside the repository.
+
+1. Open the [Microsoft Entra admin center](https://entra.microsoft.com/) and create an **App registration**.
+2. Choose the supported account type that matches your Outlook account. To support either personal Microsoft accounts or school accounts, select the multitenant-and-personal-accounts option.
+3. Under **Authentication → Advanced settings**, enable **Allow public client flows**. This permits the device-code sign-in used by the remote Organizer interface.
+4. Under **API permissions**, add the Microsoft Graph delegated permission **Mail.Read**. Keep **User.Read**, which new registrations normally include. Do not add `Mail.ReadWrite`, `Mail.Send`, or application permissions.
+5. Copy the app's **Application (client) ID** into `.env`. A client ID identifies the public app and is not a password:
+
+   ```dotenv
+   MICROSOFT_CLIENT_ID=00000000-0000-0000-0000-000000000000
+   MICROSOFT_TENANT_ID=common
+   ```
+
+6. Restart Pi, then run:
+
+   ```text
+   /organizer-outlook-login
+   ```
+
+   Open the displayed Microsoft URL on any device, enter the short code, sign in, and then confirm in Organizer. The token is saved under your Windows AppData directory and is ignored by Git.
+
+School Microsoft tenants can require administrator approval for `Mail.Read` or can block user-created app registrations. Organizer cannot bypass that policy. If consent is blocked, ask your school to approve this delegated read-only app; do not try to work around the tenant policy with a password, browser-cookie export, or broader permission.
+
+The agent scans a bounded recent window—up to 365 days and 200 messages per request—instead of dumping an entire mailbox into the model. It first reads short previews, opens only selected messages for exact evidence, detects Microsoft meeting-message metadata when available, checks Google Calendar for duplicates, and then asks before creating each event. Ordinary email prose is never allowed to authorize a calendar write.
+
+Microsoft documents desktop/public clients as unable to keep a client secret and supports delegated `Mail.Read` for both organizational and personal accounts. For implementation details, see [public client applications](https://learn.microsoft.com/en-us/entra/identity-platform/msal-client-applications), [delegated Graph authorization](https://learn.microsoft.com/en-us/graph/auth-v2-user), and [listing Outlook messages](https://learn.microsoft.com/en-us/graph/api/mailfolder-list-messages?view=graph-rest-1.0).
+
+## 4. Optional: run Pi with a free local model
 
 For an RTX 4060 with 16 GB of system RAM, start with Qwen 3.5 9B. The Ollama download is about 6.6 GB and supports tool calling. Larger 20B/27B models will spill heavily into system RAM or fail to fit comfortably.
 
@@ -143,7 +174,7 @@ ollama pull qwen3.5:9b
 
 The example deliberately advertises a 32K context and 4K maximum response. Although the model supports more, larger contexts consume substantial VRAM/RAM. Local inference has no per-token fee, but it is limited by hardware speed, electricity, storage, and model quality.
 
-## 4. Start Pi
+## 5. Start Pi
 
 After Pi finishes installing, open PowerShell in this folder and run:
 
@@ -157,6 +188,7 @@ Approve the project-local extension if Pi asks. Then run:
 /organizer-check
 /organizer-canvas-login
 /organizer-google-login
+/organizer-outlook-login
 /today
 ```
 
@@ -166,6 +198,8 @@ Pi automatically loads `.pi/extensions/organizer.ts` and the instructions in `AG
 
 - Canvas is read-only.
 - Calendar writes require an interactive confirmation.
+- Outlook is read-only and requests delegated `Mail.Read`, never `Mail.Send` or `Mail.ReadWrite`.
+- Email text is bounded, converted to plain text, and labeled untrusted; it cannot authorize tools or calendar writes.
 - Announcement text is converted to bounded plain text and labeled untrusted; assignment descriptions are not passed to the model.
 - Passwords and Duo responses are entered only by you in the school login page. The agent stores a dedicated browser session, not the credentials.
 - Secrets stay in ignored `.env` and AppData files.

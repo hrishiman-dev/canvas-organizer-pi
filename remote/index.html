@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0b0c10">
     <meta name="description" content="Private remote interface for Canvas Organizer">
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/app.css?v=0.1.1">
+    <link rel="stylesheet" href="/app.css?v=0.2.0">
     <title>Organizer</title>
   </head>
   <body>
@@ -28,10 +28,11 @@
       <section id="messages" class="messages" aria-live="polite" aria-label="Conversation">
         <div id="empty-state" class="empty-state">
           <h2>What do you need?</h2>
-          <p>Ask about Canvas, your schedule, or add something to your calendar.</p>
+          <p>Ask about Canvas, Outlook, your schedule, or add something to your calendar.</p>
           <div class="suggestions" aria-label="Suggestions">
             <button type="button" data-prompt="What do I need to do today?">Today’s work</button>
             <button type="button" data-prompt="Summarize recent Canvas announcements.">Announcements</button>
+            <button type="button" data-prompt="Scan my recent Outlook email for important future events. Show candidates, but do not add anything without my confirmation.">Outlook events</button>
             <button type="button" data-prompt="What is on my calendar tomorrow?">Tomorrow</button>
           </div>
         </div>
@@ -64,6 +65,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" hidden></div>
-    <script src="/app.js?v=0.1.1" type="module"></script>
+    <script src="/app.js?v=0.2.0" type="module"></script>
   </body>
 </html>
