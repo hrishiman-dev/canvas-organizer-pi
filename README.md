@@ -178,7 +178,7 @@ ollama pull qwen3.5:9b
 ```
 
    Fully quit and reopen Ollama after changing it. On lower-memory systems, use `8192` instead.
-4. Copy `pi-models.ollama.example.json` to `$env:USERPROFILE\.pi\agent\models.json`. If that destination already exists, merge the `ollama` provider into it instead of replacing it. Keep its `contextWindow` equal to the Ollama setting.
+4. Copy `pi-models.ollama.example.json` to `$env:USERPROFILE\.pi\agent\models.json`. If that destination already exists, merge the `ollama` provider into it instead of replacing it. Keep its `contextWindow` equal to the Ollama setting. The included `.pi/settings.json` also lowers Pi's compaction reserve for this 16K local-model window, so old turns are summarized before Ollama runs out of space.
 5. Start Pi, run `/model`, and select **Qwen 3.5 9B (local)**.
 
 The example uses a 16K context and 4K maximum response. Larger contexts consume substantial VRAM/RAM; if Ollama is left at its 4K default while Pi advertises a larger window, long chats can silently exhaust the real context before Pi compacts them. Local inference has no per-token fee, but it is limited by hardware speed, electricity, storage, and model quality.
