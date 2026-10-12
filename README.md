@@ -15,7 +15,7 @@ The project is local-first: the bridge binds only to loopback, credentials stay 
 - Windows 10 or 11
 - Node.js 22.6 or newer
 - [Pi](https://github.com/earendil-works/pi) 0.85.1 or newer
-- Chrome or Edge for saved-session Canvas access
+- Chrome or Edge for saved-session Canvas and Outlook Web access
 - A model provider; [Ollama](https://ollama.com/) is optional for local inference
 - Optional: [Tailscale](https://tailscale.com/) for private access from other devices
 
@@ -43,6 +43,7 @@ Edit `.env`, then start `pi` from the repository root. Pi discovers the project 
 - “Show every assignment and module in my chemistry course.”
 - Active courses, visible grades, recent announcements, assignments, and modules
 - `/today`, `/organizer-check`, `/organizer-canvas-login`, `/organizer-google-login`, and `/organizer-outlook-login`
+- Image attachments from the private remote interface when the selected model supports vision
 
 The organizer does not submit assignments or send Canvas messages. An optional Windows task can refresh a daily briefing in the background at no cost.
 
@@ -131,7 +132,25 @@ On your iPhone, either install Google Calendar and sign into the same account, o
 
 ## 3. Connect Outlook mail (optional)
 
-Outlook access uses the official Microsoft Graph API with delegated, read-only `Mail.Read` permission. There is no Microsoft client secret and no paid cloud resource. The organizer stores only the resulting refresh token outside the repository.
+### Recommended for restricted school accounts: saved Outlook Web login
+
+Set the browser in `.env` (Chrome is the default), restart Pi, and run:
+
+```dotenv
+OUTLOOK_BROWSER=chrome
+```
+
+```text
+/organizer-outlook-login
+```
+
+A separate browser profile opens. Sign into Outlook with your school account and complete MFA yourself. Organizer stores the signed-in browser session under `%LOCALAPPDATA%\CanvasOrganizer\outlook-browser-profile`; it never reads or stores your password or MFA response.
+
+Browser mode is deliberately bounded and read-only: it scans up to 200 message rows already visible in the Outlook Web inbox and returns sender, subject, time, unread state, and the visible preview. It does not click or open messages, because Outlook may mark them read. This means browser mode cannot retrieve a hidden full body or reliable structured meeting metadata. The model treats every result as untrusted email content and must still show you an event candidate before any separate Google Calendar confirmation.
+
+### Advanced alternative: Microsoft Graph
+
+If your Microsoft tenant permits app registration and delegated consent, Graph mode can read full sanitized message bodies and structured meeting metadata with delegated, read-only `Mail.Read`. There is no Microsoft client secret or paid cloud resource.
 
 1. Open the [Microsoft Entra admin center](https://entra.microsoft.com/) and create an **App registration**.
 2. Choose the supported account type that matches your Outlook account. To support either personal Microsoft accounts or school accounts, select the multitenant-and-personal-accounts option.
@@ -149,20 +168,20 @@ Outlook access uses the official Microsoft Graph API with delegated, read-only `
 6. Restart Pi, then run:
 
    ```text
-   /organizer-outlook-login
+   /organizer-outlook-graph-login
    ```
 
    Open the displayed Microsoft URL on any device, enter the short code, sign in, and then confirm in Organizer. The token is saved under your Windows AppData directory and is ignored by Git.
 
-School Microsoft tenants can require administrator approval for `Mail.Read` or can block user-created app registrations. Organizer cannot bypass that policy. If consent is blocked, ask your school to approve this delegated read-only app; do not try to work around the tenant policy with a password, browser-cookie export, or broader permission.
+Set `OUTLOOK_MODE=graph` in `.env` if both a browser session and Graph are configured and you want to prefer Graph. School Microsoft tenants can require administrator approval for `Mail.Read` or block user-created app registrations. Organizer cannot bypass that policy; use the saved-session browser mode above or ask your school to approve the delegated read-only app.
 
-The agent scans a bounded recent window—up to 365 days and 200 messages per request—instead of dumping an entire mailbox into the model. It first reads short previews, opens only selected messages for exact evidence, detects Microsoft meeting-message metadata when available, checks Google Calendar for duplicates, and then asks before creating each event. Ordinary email prose is never allowed to authorize a calendar write.
+In either mode, the agent scans a bounded window—up to 365 days and 200 messages per request—instead of dumping an entire mailbox into the model. It checks Google Calendar for duplicates and then asks before creating each event. Ordinary email prose is never allowed to authorize a calendar write.
 
 Microsoft documents desktop/public clients as unable to keep a client secret and supports delegated `Mail.Read` for both organizational and personal accounts. For implementation details, see [public client applications](https://learn.microsoft.com/en-us/entra/identity-platform/msal-client-applications), [delegated Graph authorization](https://learn.microsoft.com/en-us/graph/auth-v2-user), and [listing Outlook messages](https://learn.microsoft.com/en-us/graph/api/mailfolder-list-messages?view=graph-rest-1.0).
 
 ## 4. Optional: run Pi with a free local model
 
-For an RTX 4060 with 16 GB of system RAM, start with Qwen 3.5 9B. The Ollama download is about 6.6 GB and supports tool calling. Larger 20B/27B models will spill heavily into system RAM or fail to fit comfortably.
+For an RTX 4060 with 16 GB of system RAM, start with Qwen 3.5 9B. The Ollama download is about 6.6 GB and supports tool calling and image input. Larger 20B/27B models will spill heavily into system RAM or fail to fit comfortably.
 
 1. Install [Ollama](https://ollama.com/download/windows).
 2. Download the model:
@@ -207,7 +226,7 @@ Pi automatically loads `.pi/extensions/organizer.ts` and the instructions in `AG
 
 - Canvas is read-only.
 - Calendar writes require an interactive confirmation.
-- Outlook is read-only and requests delegated `Mail.Read`, never `Mail.Send` or `Mail.ReadWrite`.
+- Outlook is read-only. Browser mode only reads the inbox list; optional Graph mode requests delegated `Mail.Read`, never `Mail.Send` or `Mail.ReadWrite`.
 - Email text is bounded, converted to plain text, and labeled untrusted; it cannot authorize tools or calendar writes.
 - Announcement text is converted to bounded plain text and labeled untrusted; assignment descriptions are not passed to the model.
 - Passwords and Duo responses are entered only by you in the school login page. The agent stores a dedicated browser session, not the credentials.
@@ -262,7 +281,9 @@ The organizer includes a small mobile-friendly web interface that talks to Pi th
 
    Tailscale prints the private HTTPS address. Open that address from any signed-in device. On iPhone, use Safari's **Add to Home Screen** for an app-like shortcut.
 
-The web interface supports streaming replies, queued follow-up prompts, automatic history resynchronization, conversation reset/stop, and durable Pi extension confirmations across reconnects. It actively reconnects after a phone or laptop wakes from sleep, preserves an unsent draft and in-flight message state, and tracks every message through accepted, running, completed, or failed. A thinking-only/context-limited response appears explicitly with a safe manual **Retry** option instead of disappearing. If a reply appears stuck, use **Sync** in the header; syncing never resends an accepted prompt, so it cannot duplicate a calendar request. Calendar changes still require an explicit confirmation from the remote interface.
+The web interface supports streaming replies, queued follow-up prompts, image attachments, automatic history resynchronization, conversation reset/stop, and durable Pi extension confirmations across reconnects. On a phone, the attachment button opens the normal camera/photo picker; on desktop, you can also paste or drag images. Up to four PNG, JPEG, WebP, or GIF images can be sent at once, with a 6 MB per-image and 16 MB combined limit. Large photos are optimized in the browser before upload, and the local model must support vision.
+
+It actively reconnects after a phone or laptop wakes from sleep, preserves an unsent draft and in-flight message state, and tracks every message through accepted, running, completed, or failed. A thinking-only/context-limited response appears explicitly with a safe manual **Retry** option instead of disappearing. If a reply appears stuck, use **Sync** in the header; syncing never resends an accepted prompt, so it cannot duplicate a calendar request. Calendar changes still require an explicit confirmation from the remote interface.
 
 To launch the bridge without a visible terminal, run `scripts\start-remote-hidden.vbs` from its location in the repository. If you want it at sign-in, create a shortcut to that file in `shell:startup`; do not copy the VBS file out of the repository because it resolves the launcher relative to its own location.
 
@@ -279,7 +300,7 @@ npm test
 npm run check
 ```
 
-The test suite covers Canvas normalization and sanitization, calendar time guards, iCalendar parsing, and the local remote bridge's security headers and input validation. CI runs the same checks on Windows with Node.js 22.
+The test suite covers Canvas normalization and sanitization, calendar time guards, iCalendar parsing, image-payload validation, and the local remote bridge's security headers and input validation. CI runs the same checks on Windows with Node.js 22.
 
 ## Contributing and security
 

@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0b0c10">
     <meta name="description" content="Private remote interface for Canvas Organizer">
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/app.css?v=0.3.0">
+    <link rel="stylesheet" href="/app.css?v=0.4.0">
     <title>Organizer</title>
   </head>
   <body>
@@ -41,6 +41,11 @@
       <div id="activity" class="activity" role="status" aria-live="polite" hidden></div>
 
       <form id="composer" class="composer">
+        <div id="attachment-tray" class="attachment-tray" aria-label="Attached images" hidden></div>
+        <input id="image-input" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple>
+        <button id="attach-button" class="attach-button" type="button" aria-label="Attach images" title="Attach images">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>
+        </button>
         <label class="sr-only" for="prompt">Message Organizer</label>
         <textarea id="prompt" name="prompt" rows="1" maxlength="8000" placeholder="Message Organizer…" enterkeyhint="send"></textarea>
         <button id="send-button" class="send-button" type="submit" aria-label="Send message">
@@ -65,6 +70,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" hidden></div>
-    <script src="/app.js?v=0.3.0" type="module"></script>
+    <script src="/app.js?v=0.4.0" type="module"></script>
   </body>
 </html>

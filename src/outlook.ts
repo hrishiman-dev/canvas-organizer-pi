@@ -1,6 +1,12 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import {
+  checkOutlookBrowser,
+  getOutlookBrowserMessage,
+  hasOutlookBrowserSession,
+  listOutlookBrowserMessages,
+} from "./outlook-browser.ts";
 
 const GRAPH_ORIGIN = "https://graph.microsoft.com";
 const MICROSOFT_LOGIN_ORIGIN = "https://login.microsoftonline.com";
@@ -9,6 +15,16 @@ const tokenDir = join(process.env.APPDATA || join(homedir(), ".config"), "canvas
 const tokenPath = join(tokenDir, "microsoft-token.json");
 
 type TokenFile = { refreshToken: string };
+
+export type OutlookDataSource = "graph" | "browser" | "unconfigured";
+
+export function outlookDataSource(): OutlookDataSource {
+  const requested = process.env.OUTLOOK_MODE?.trim().toLowerCase();
+  if (requested === "graph") return process.env.MICROSOFT_CLIENT_ID ? "graph" : "unconfigured";
+  if (hasOutlookBrowserSession()) return "browser";
+  if (process.env.MICROSOFT_CLIENT_ID) return "graph";
+  return "unconfigured";
+}
 
 export type OutlookLoginSession = {
   deviceCode: string;
@@ -33,7 +49,7 @@ export type OutlookMessageSummary = {
 function oauthConfig(): { clientId: string; tenant: string } {
   const clientId = process.env.MICROSOFT_CLIENT_ID?.trim();
   const tenant = process.env.MICROSOFT_TENANT_ID?.trim() || "common";
-  if (!clientId) throw new Error("Outlook is not configured. Set MICROSOFT_CLIENT_ID, then run /organizer-outlook-login.");
+  if (!clientId) throw new Error("Outlook Graph is not configured. Set MICROSOFT_CLIENT_ID, then run /organizer-outlook-graph-login.");
   if (!/^[a-zA-Z0-9.-]{1,100}$/.test(tenant)) throw new Error("MICROSOFT_TENANT_ID is invalid.");
   return { clientId, tenant };
 }
@@ -206,7 +222,7 @@ export async function finishOutlookLogin(session: OutlookLoginSession, signal?: 
     }
     throw new Error(`Outlook sign-in failed: ${safeText(response.body.error_description ?? code, "unknown error", 300)}`);
   }
-  throw new Error("Outlook sign-in code expired. Run /organizer-outlook-login again.");
+  throw new Error("Outlook sign-in code expired. Run /organizer-outlook-graph-login again.");
 }
 
 export function normalizeOutlookMessage(message: any): OutlookMessageSummary | null {
@@ -229,6 +245,12 @@ export function normalizeOutlookMessage(message: any): OutlookMessageSummary | n
 }
 
 export async function listOutlookMessages(options: { daysBack?: number; maxResults?: number; unreadOnly?: boolean; signal?: AbortSignal } = {}): Promise<OutlookMessageSummary[]> {
+  if (outlookDataSource() === "browser") {
+    return listOutlookBrowserMessages({ maxResults: options.maxResults, unreadOnly: options.unreadOnly });
+  }
+  if (outlookDataSource() === "unconfigured") {
+    throw new Error("Outlook is not connected. Run /organizer-outlook-login to save a school Outlook Web session.");
+  }
   const daysBack = Math.max(1, Math.min(365, Math.floor(options.daysBack ?? 30)));
   const maxResults = Math.max(1, Math.min(200, Math.floor(options.maxResults ?? 50)));
   const since = new Date(Date.now() - daysBack * 86_400_000).toISOString();
@@ -260,6 +282,7 @@ function validMessageId(value: string): string {
 }
 
 export async function getOutlookMessage(messageId: string, signal?: AbortSignal): Promise<any> {
+  if (messageId.startsWith("web-")) return getOutlookBrowserMessage(messageId);
   const id = validMessageId(messageId);
   const body = await graphRequest(`${GRAPH_ORIGIN}/v1.0/me/messages/${encodeURIComponent(id)}?$expand=microsoft.graph.eventMessage/event`, signal);
   const summary = normalizeOutlookMessage(body);
@@ -281,6 +304,8 @@ export async function getOutlookMessage(messageId: string, signal?: AbortSignal)
 }
 
 export async function checkOutlook(signal?: AbortSignal): Promise<{ displayName: string; address: string }> {
+  if (outlookDataSource() === "browser") return checkOutlookBrowser();
+  if (outlookDataSource() === "unconfigured") throw new Error("Outlook is not connected. Run /organizer-outlook-login.");
   const profile = await graphRequest(`${GRAPH_ORIGIN}/v1.0/me?$select=displayName,mail,userPrincipalName`, signal);
   return {
     displayName: safeText(profile.displayName, "Microsoft user", 200),

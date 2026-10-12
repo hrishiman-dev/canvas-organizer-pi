@@ -5,6 +5,7 @@ import { parseCanvasIcal } from "../src/ical.ts";
 import { localDateTimeToInstant, organizerClock, organizerDateWindow, validateCalendarLookupRange, validateCalendarWriteStart } from "../src/time-context.ts";
 import { getCanvasAgenda } from "../src/canvas.ts";
 import { normalizeOutlookMessage, outlookGraphUrl, safeOutlookText } from "../src/outlook.ts";
+import { normalizeOutlookDomRows } from "../src/outlook-browser.ts";
 
 test("normalizes Canvas origins", () => {
   assert.equal(normalizeCanvasOrigin("https://school.instructure.com/api/v1/"), "https://school.instructure.com");
@@ -171,4 +172,19 @@ test("normalizes Outlook message previews without carrying extra mailbox fields"
 test("rejects cross-origin Microsoft Graph continuation URLs", () => {
   assert.equal(outlookGraphUrl("https://graph.microsoft.com/v1.0/me/messages").origin, "https://graph.microsoft.com");
   assert.throws(() => outlookGraphUrl("https://attacker.example/collect"), /unsafe continuation URL/);
+});
+
+test("normalizes bounded Outlook Web inbox rows", () => {
+  const messages = normalizeOutlookDomRows([{
+    text: "Registrar\nFall advising appointment\nTomorrow 2:00 PM\nBring your course plan",
+    label: "Unread message with attachment",
+    unread: true,
+  }]);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].sender.name, "Registrar");
+  assert.equal(messages[0].subject, "Fall advising appointment");
+  assert.equal(messages[0].isRead, false);
+  assert.equal(messages[0].hasAttachments, true);
+  assert.equal(messages[0].bodyLimited, true);
+  assert.match(messages[0].id, /^web-[a-f0-9]{24}$/);
 });

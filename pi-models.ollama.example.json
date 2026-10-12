@@ -13,7 +13,7 @@
           "id": "qwen3.5:9b",
           "name": "Qwen 3.5 9B (local)",
           "reasoning": true,
-          "input": ["text"],
+          "input": ["text", "image"],
           "contextWindow": 16384,
           "maxTokens": 4096,
           "cost": {

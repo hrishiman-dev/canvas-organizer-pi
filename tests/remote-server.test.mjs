@@ -80,7 +80,7 @@ test("remote bridge serves the UI securely and validates prompts", async (t) => 
   assert.match(await page.text(), /<title>Organizer<\/title>/);
 
   const heartbeat = await readSseUntil(origin, (record) => record.type === "heartbeat");
-  assert.equal(heartbeat.state, "stopped");
+  assert.ok(["starting", "error"].includes(heartbeat.state));
   assert.equal(typeof heartbeat.at, "number");
 
   const sync = await fetch(`${origin}/api/sync`, {
@@ -88,8 +88,10 @@ test("remote bridge serves the UI securely and validates prompts", async (t) => 
     headers: { "Content-Type": "application/json" },
     body: "{}",
   });
-  assert.equal(sync.status, 200);
-  assert.deepEqual(await sync.json(), { accepted: false, state: "stopped" });
+  assert.equal(sync.status, 202);
+  const syncBody = await sync.json();
+  assert.equal(syncBody.accepted, true);
+  assert.match(syncBody.requestId, /^sync-/);
 
   const empty = await fetch(`${origin}/api/prompt`, {
     method: "POST",
@@ -97,6 +99,25 @@ test("remote bridge serves the UI securely and validates prompts", async (t) => 
     body: JSON.stringify({ message: "   " }),
   });
   assert.equal(empty.status, 400);
+
+  const imageOnly = await fetch(`${origin}/api/prompt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: "",
+      clientId: "image-test",
+      images: [{ type: "image", mimeType: "image/png", data: Buffer.from("test-image").toString("base64") }],
+    }),
+  });
+  assert.equal(imageOnly.status, 202);
+  assert.equal((await imageOnly.json()).accepted, true);
+
+  const unsupportedImage = await fetch(`${origin}/api/prompt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "Look", images: [{ type: "image", mimeType: "image/svg+xml", data: "AAAA" }] }),
+  });
+  assert.equal(unsupportedImage.status, 400);
 
   const missing = await fetch(`${origin}/not-a-route`);
   assert.equal(missing.status, 404);

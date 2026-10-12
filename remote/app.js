@@ -1,6 +1,9 @@
 const messages = document.querySelector("#messages");
 const composer = document.querySelector("#composer");
 const promptInput = document.querySelector("#prompt");
+const imageInput = document.querySelector("#image-input");
+const attachButton = document.querySelector("#attach-button");
+const attachmentTray = document.querySelector("#attachment-tray");
 const sendButton = document.querySelector("#send-button");
 const stopButton = document.querySelector("#stop-button");
 const newButton = document.querySelector("#new-button");
@@ -23,12 +26,17 @@ let reconnectAttempt = 0;
 let lastEventAt = 0;
 let hiddenAt = 0;
 let lastResumeAt = 0;
+let selectedImages = [];
 const pendingPrompts = new Map();
 const HEARTBEAT_STALE_MS = 40_000;
 const BACKGROUND_RECONNECT_MS = 10_000;
 const DRAFT_KEY = "organizer-remote-draft";
 const PENDING_KEY = "organizer-remote-pending-v1";
 const CAN_AUTOFOCUS = matchMedia("(hover: hover) and (pointer: fine)").matches;
+const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MAX_IMAGE_COUNT = 4;
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+const MAX_IMAGE_TOTAL_BYTES = 16 * 1024 * 1024;
 
 function scrollToBottom(force = false) {
   const nearBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 140;
@@ -63,7 +71,29 @@ function appendMessage(role, text = "", options = {}) {
   }
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.textContent = text;
+  const attached = Array.isArray(options.images) ? options.images : [];
+  if (attached.length) {
+    const gallery = document.createElement("div");
+    gallery.className = "message-images";
+    for (const image of attached) {
+      if (!ALLOWED_IMAGE_TYPES.has(image?.mimeType) || typeof image?.data !== "string") continue;
+      const preview = document.createElement("img");
+      preview.src = `data:${image.mimeType};base64,${image.data}`;
+      preview.alt = "Attached image";
+      preview.loading = "lazy";
+      gallery.append(preview);
+    }
+    if (gallery.children.length) bubble.append(gallery);
+  } else if (options.imageCount) {
+    const summary = document.createElement("div");
+    summary.className = "image-summary";
+    summary.textContent = `${options.imageCount} image${options.imageCount === 1 ? "" : "s"} attached`;
+    bubble.append(summary);
+  }
+  const textBlock = document.createElement("div");
+  textBlock.className = "bubble-text";
+  textBlock.textContent = text;
+  bubble.append(textBlock);
   wrapper.append(bubble);
   if (options.status) {
     const status = document.createElement("div");
@@ -73,7 +103,7 @@ function appendMessage(role, text = "", options = {}) {
   }
   messages.append(wrapper);
   scrollToBottom(options.forceScroll);
-  return bubble;
+  return textBlock;
 }
 
 function setPendingStatus(id, label, options = {}) {
@@ -100,7 +130,8 @@ function setPendingStatus(id, label, options = {}) {
 
 function savePendingPrompts() {
   try {
-    sessionStorage.setItem(PENDING_KEY, JSON.stringify([...pendingPrompts.entries()]));
+    const safe = [...pendingPrompts.entries()].map(([id, pending]) => [id, { ...pending, images: undefined }]);
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify(safe));
   } catch {
     // Delivery recovery still works for the current in-memory session.
   }
@@ -149,9 +180,9 @@ function showToast(message) {
   toastTimer = setTimeout(() => { toast.hidden = true; }, 4500);
 }
 
-async function post(path, body = {}) {
+async function post(path, body = {}, timeoutMs = 15_000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(path, {
@@ -174,21 +205,29 @@ async function post(path, body = {}) {
   return value;
 }
 
-async function sendPrompt(text) {
+function imagePayload(image) {
+  return { type: "image", data: image.data, mimeType: image.mimeType };
+}
+
+async function sendPrompt(text, attachments = selectedImages) {
   const message = text.trim();
-  if (!message || posting) return;
+  const images = attachments.map(imagePayload);
+  if ((!message && !images.length) || posting) return;
   const pendingId = crypto.randomUUID();
   const requestId = `prompt-${pendingId}`;
-  pendingPrompts.set(pendingId, { text: message, requestId, status: "Sending…", acceptedAt: 0, syncRequested: false });
+  const visibleMessage = message || "Attached image";
+  pendingPrompts.set(pendingId, { text: message || "Please help me with the attached image(s).", images, imageCount: images.length, requestId, status: "Sending…", acceptedAt: 0, syncRequested: false });
   savePendingPrompts();
-  appendMessage("user", message, { pendingId, status: "Sending…", forceScroll: true });
+  appendMessage("user", visibleMessage, { images, pendingId, status: "Sending…", forceScroll: true });
   promptInput.value = "";
+  selectedImages = [];
+  renderAttachmentTray();
   saveDraft();
   resizeComposer();
   posting = true;
   setWorking(true, working ? "Queueing your message…" : "Starting Pi…");
   try {
-    const result = await post("/api/prompt", { message, clientId: pendingId });
+    const result = await post("/api/prompt", { message, images, clientId: pendingId }, 45_000);
     const pending = pendingPrompts.get(pendingId);
     if (pending) {
       pending.requestId = result.requestId || requestId;
@@ -214,10 +253,14 @@ async function sendPrompt(text) {
 function retryPrompt(id) {
   const pending = pendingPrompts.get(id);
   if (!pending) return;
+  if (pending.imageCount && !pending.images?.length) {
+    showToast("Reattach the image before retrying this message.");
+    return;
+  }
   pendingPrompts.delete(id);
   savePendingPrompts();
   messages.querySelector(`[data-pending-id="${CSS.escape(id)}"]`)?.remove();
-  sendPrompt(pending.text);
+  sendPrompt(pending.text, pending.images || []);
 }
 
 function saveDraft() {
@@ -236,8 +279,116 @@ function restoreDraft() {
 function resizeComposer() {
   promptInput.style.height = "auto";
   promptInput.style.height = `${Math.min(promptInput.scrollHeight, 160)}px`;
-  sendButton.disabled = posting || !promptInput.value.trim();
+  sendButton.disabled = posting || (!promptInput.value.trim() && !selectedImages.length);
+  attachButton.disabled = posting || selectedImages.length >= MAX_IMAGE_COUNT;
   newButton.disabled = working || posting;
+}
+
+function readAsDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("That image could not be read."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadBrowserImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("That image format could not be opened."));
+    };
+    image.src = url;
+  });
+}
+
+async function optimizeLargeImage(file) {
+  if (file.type === "image/gif" || file.size <= 3 * 1024 * 1024) return file;
+  const image = await loadBrowserImage(file);
+  const scale = Math.min(1, 2048 / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.86));
+  if (!blob) throw new Error("That image could not be optimized.");
+  return blob;
+}
+
+async function prepareImage(file) {
+  const mimeType = String(file.type || "").toLowerCase();
+  if (!ALLOWED_IMAGE_TYPES.has(mimeType)) throw new Error(`${file.name || "That file"} is not a supported image.`);
+  if (!file.size) throw new Error(`${file.name || "That image"} is empty.`);
+  if (file.size > 24 * 1024 * 1024) throw new Error(`${file.name || "That image"} is too large to process.`);
+  const prepared = await optimizeLargeImage(file);
+  if (prepared.size > MAX_IMAGE_BYTES) throw new Error(`${file.name || "That image"} must be 6 MB or smaller.`);
+  const dataUrl = await readAsDataUrl(prepared);
+  const separator = dataUrl.indexOf(",");
+  if (separator < 0) throw new Error("That image could not be encoded.");
+  return {
+    type: "image",
+    name: file.name || "image",
+    mimeType: prepared.type || mimeType,
+    data: dataUrl.slice(separator + 1),
+    byteLength: prepared.size,
+  };
+}
+
+function renderAttachmentTray() {
+  attachmentTray.replaceChildren();
+  for (const [index, image] of selectedImages.entries()) {
+    const item = document.createElement("div");
+    item.className = "attachment";
+    const preview = document.createElement("img");
+    preview.src = `data:${image.mimeType};base64,${image.data}`;
+    preview.alt = "";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove-attachment";
+    remove.setAttribute("aria-label", `Remove ${image.name}`);
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      selectedImages.splice(index, 1);
+      renderAttachmentTray();
+      resizeComposer();
+    });
+    item.append(preview, remove);
+    attachmentTray.append(item);
+  }
+  attachmentTray.hidden = selectedImages.length === 0;
+}
+
+async function addImageFiles(files) {
+  const available = MAX_IMAGE_COUNT - selectedImages.length;
+  if (available <= 0) return showToast(`You can attach up to ${MAX_IMAGE_COUNT} images.`);
+  const incoming = [...files].filter((file) => file.type?.startsWith("image/"));
+  if (!incoming.length) return showToast("Choose a PNG, JPEG, WebP, or GIF image.");
+  if (incoming.length > available) showToast(`Only the first ${available} image${available === 1 ? "" : "s"} will be attached.`);
+  attachButton.disabled = true;
+  try {
+    for (const file of incoming.slice(0, available)) {
+      const prepared = await prepareImage(file);
+      const total = selectedImages.reduce((sum, image) => sum + image.byteLength, 0) + prepared.byteLength;
+      if (total > MAX_IMAGE_TOTAL_BYTES) throw new Error("Attached images must total 16 MB or less.");
+      selectedImages.push(prepared);
+      renderAttachmentTray();
+    }
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "That image could not be attached.");
+  } finally {
+    imageInput.value = "";
+    resizeComposer();
+  }
 }
 
 function extractText(message) {
@@ -247,6 +398,13 @@ function extractText(message) {
   return "";
 }
 
+function extractImages(message) {
+  if (!Array.isArray(message?.content)) return [];
+  return message.content
+    .filter((part) => part?.type === "image" && ALLOWED_IMAGE_TYPES.has(part.mimeType) && typeof part.data === "string")
+    .map(imagePayload);
+}
+
 function renderHistory(records) {
   const useful = (records || []).filter((message) => message?.role === "user" || message?.role === "assistant");
   const matchedPending = new Set();
@@ -254,26 +412,27 @@ function renderHistory(records) {
   assistantBubble = null;
   for (const message of useful) {
     const text = extractText(message);
-    if (!text) continue;
+    const images = extractImages(message);
+    if (!text && !images.length) continue;
     const match = message.role === "user"
       ? [...pendingPrompts.entries()].find(([id, pending]) => !matchedPending.has(id) && pending.text === text)
       : null;
     if (match) {
       const [id, pending] = match;
       matchedPending.add(id);
-      appendMessage("user", text, { pendingId: id, status: pending.status });
+      appendMessage("user", text || "Attached image", { images: images.length ? images : pending.images, imageCount: pending.imageCount, pendingId: id, status: pending.status });
       setPendingStatus(id, pending.status, {
         accepted: pending.acceptedAt > 0,
         failed: pending.status.includes("not confirmed") || pending.status.includes("No reply") || pending.status.includes("failed"),
         retry: Boolean(pending.retrySafe),
       });
     } else {
-      appendMessage(message.role, text);
+      appendMessage(message.role, text, { images });
     }
   }
   for (const [id, pending] of pendingPrompts) {
     if (matchedPending.has(id)) continue;
-    appendMessage("user", pending.text, { pendingId: id, status: pending.status });
+    appendMessage("user", pending.text, { images: pending.images, imageCount: pending.imageCount, pendingId: id, status: pending.status });
     setPendingStatus(id, pending.status, { accepted: pending.acceptedAt > 0, failed: pending.status.includes("not confirmed") || pending.status.includes("No reply") || pending.status.includes("failed"), retry: Boolean(pending.retrySafe) });
   }
   if (!messages.children.length) showEmptyState();
@@ -348,14 +507,17 @@ function handleRecord(record) {
     }
     pending.status = labels[record.status] || pending.status;
     pending.retrySafe = Boolean(record.retrySafe);
+    const canRetry = pending.retrySafe && (!pending.imageCount || pending.images?.length);
     if (record.status === "accepted" || record.status === "acknowledged" || record.status === "running") pending.acceptedAt ||= record.updatedAt || Date.now();
     setPendingStatus(id, pending.status, {
       accepted: ["accepted", "acknowledged", "running"].includes(record.status),
       failed: ["failed", "empty"].includes(record.status),
-      retry: pending.retrySafe,
+      retry: canRetry,
     });
     savePendingPrompts();
-    if (record.status === "empty" && record.retrySafe) showToast("Pi ended without a reply. You can safely retry this message.");
+    if (record.status === "empty" && record.retrySafe) {
+      showToast(canRetry ? "Pi ended without a reply. You can safely retry this message." : "Pi ended without a reply. Reattach the image to retry.");
+    }
     if (record.status === "failed") setWorking(false);
     return;
   }
@@ -448,9 +610,31 @@ composer.addEventListener("submit", (event) => {
   sendPrompt(promptInput.value);
 });
 
+attachButton.addEventListener("click", () => imageInput.click());
+imageInput.addEventListener("change", () => addImageFiles(imageInput.files || []));
+
+composer.addEventListener("dragover", (event) => {
+  if (!event.dataTransfer?.types.includes("Files")) return;
+  event.preventDefault();
+  composer.classList.add("is-dragging");
+});
+composer.addEventListener("dragleave", () => composer.classList.remove("is-dragging"));
+composer.addEventListener("drop", (event) => {
+  composer.classList.remove("is-dragging");
+  if (!event.dataTransfer?.files.length) return;
+  event.preventDefault();
+  addImageFiles(event.dataTransfer.files);
+});
+
 promptInput.addEventListener("input", () => {
   saveDraft();
   resizeComposer();
+});
+promptInput.addEventListener("paste", (event) => {
+  const images = [...(event.clipboardData?.files || [])].filter((file) => file.type?.startsWith("image/"));
+  if (!images.length) return;
+  event.preventDefault();
+  addImageFiles(images);
 });
 promptInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {

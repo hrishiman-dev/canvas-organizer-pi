@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyAgentEnd } from "./remote-protocol.mjs";
+import { classifyAgentEnd, normalizePromptImages } from "./remote-protocol.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const publicRoot = join(projectRoot, "remote");
@@ -36,6 +36,7 @@ function publicPromptStatus(request) {
     status: request.status,
     reason: request.reason || null,
     retrySafe: Boolean(request.retrySafe),
+    imageCount: request.imageCount || 0,
     updatedAt: request.updatedAt,
   };
 }
@@ -101,7 +102,7 @@ function piLaunch() {
     command = join(piDirectory, "node.exe");
     args.push(join(piDirectory, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js"));
   }
-  args.push("--mode", "rpc", "--name", "Organizer Remote");
+  args.push("--mode", "rpc", "--continue", "--name", "Organizer Remote");
   if (process.env.PI_PROVIDER) args.push("--provider", process.env.PI_PROVIDER);
   if (process.env.PI_MODEL) args.push("--model", process.env.PI_MODEL);
   return { command, args };
@@ -222,6 +223,11 @@ function consumePiOutput(chunk) {
           if (index >= 0) promptQueue.splice(index, 1);
         }
       }
+      if (record.type === "response" && record.command === "new_session" && record.success && !record.data?.cancelled) {
+        promptRequests.clear();
+        promptQueue.length = 0;
+        activePromptId = null;
+      }
     } catch {
       process.stderr.write("[pi] Ignored a non-JSON RPC output line.\n");
     }
@@ -260,7 +266,11 @@ async function readJson(request, maxBytes = 32_768) {
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > maxBytes) throw new Error("Request is too large.");
+    if (size > maxBytes) {
+      const error = new Error("Request is too large.");
+      error.statusCode = 413;
+      throw error;
+    }
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
@@ -309,13 +319,21 @@ const server = createServer(async (request, response) => {
         clearInterval(heartbeat);
         clients.delete(id);
       });
-      if (piProcess) sendToPi({ id: `history-${id}`, type: "get_messages" });
+      sendToPi({ id: `history-${id}`, type: "get_messages" });
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/prompt") {
-      const body = await readJson(request);
-      const message = typeof body.message === "string" ? body.message.trim() : "";
-      if (!message || message.length > 8_000) return json(response, 400, { error: "Message must contain 1–8,000 characters." });
+      const body = await readJson(request, 24 * 1024 * 1024);
+      const typedMessage = typeof body.message === "string" ? body.message.trim() : "";
+      let images;
+      try {
+        images = normalizePromptImages(body.images);
+      } catch (error) {
+        return json(response, 400, { error: error instanceof Error ? error.message : "Invalid image attachment." });
+      }
+      if (!typedMessage && !images.length) return json(response, 400, { error: "Add a message or attach an image." });
+      if (typedMessage.length > 8_000) return json(response, 400, { error: "Message must contain no more than 8,000 characters." });
+      const message = typedMessage || "Please help me with the attached image(s).";
       const clientId = typeof body.clientId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(body.clientId) ? body.clientId : randomUUID();
       const requestId = `prompt-${clientId}`;
       if (promptRequests.has(requestId) && !terminalPromptStates.has(promptRequests.get(requestId).status)) {
@@ -327,21 +345,21 @@ const server = createServer(async (request, response) => {
         status: "accepted",
         reason: null,
         retrySafe: false,
+        imageCount: images.length,
         updatedAt: Date.now(),
       });
       promptQueue.push(requestId);
-      const delivery = sendToPi({ id: requestId, type: "prompt", message, streamingBehavior: "followUp" });
+      const prompt = { id: requestId, type: "prompt", message, streamingBehavior: "followUp" };
+      if (images.length) prompt.images = images;
+      const delivery = sendToPi(prompt);
       broadcast(publicPromptStatus(promptRequests.get(requestId)));
       console.log(`[remote] Accepted prompt ${requestId}; state=${piState}.`);
       return json(response, 202, { accepted: true, requestId, delivery });
     }
     if (request.method === "POST" && url.pathname === "/api/sync") {
-      if (piProcess && !piProcess.killed) {
-        const requestId = `sync-${randomUUID()}`;
-        sendToPi({ id: requestId, type: "get_messages" });
-        return json(response, 202, { accepted: true, requestId, state: piState });
-      }
-      return json(response, 200, { accepted: false, state: piState });
+      const requestId = `sync-${randomUUID()}`;
+      const delivery = sendToPi({ id: requestId, type: "get_messages" });
+      return json(response, 202, { accepted: true, requestId, state: piState, delivery });
     }
     if (request.method === "POST" && url.pathname === "/api/ui-response") {
       const body = await readJson(request);
@@ -372,7 +390,7 @@ const server = createServer(async (request, response) => {
     return serveFile(response, filename);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return json(response, 500, { error: message });
+    return json(response, Number.isInteger(error?.statusCode) ? error.statusCode : 500, { error: message });
   }
 });
 
