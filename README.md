@@ -135,7 +135,9 @@ Outlook access uses the official Microsoft Graph API with delegated, read-only `
 
 1. Open the [Microsoft Entra admin center](https://entra.microsoft.com/) and create an **App registration**.
 2. Choose the supported account type that matches your Outlook account. To support either personal Microsoft accounts or school accounts, select the multitenant-and-personal-accounts option.
-3. Under **Authentication → Advanced settings**, enable **Allow public client flows**. This permits the device-code sign-in used by the remote Organizer interface.
+3. Make sure you opened the registration under **Microsoft Entra ID → App registrations**, not the similarly named **Enterprise applications** area. Select the app, then open **Manage → Authentication → Advanced settings**. Set **Allow public client flows** to **Yes** and save. In some versions of the portal, the same switch is labeled **Enable the following mobile and desktop flows**.
+   - If **Authentication** has no advanced-settings section, choose **Add a platform → Mobile and desktop applications**, select `https://login.microsoftonline.com/common/oauth2/nativeclient`, and save; then return to **Authentication** and enable the public-client switch.
+   - If the portal still hides the switch, open **Manage → Manifest**, set `isFallbackPublicClient` to `true` in the Microsoft Graph manifest, and save. Older AAD Graph manifests call the same property `allowPublicClient`.
 4. Under **API permissions**, add the Microsoft Graph delegated permission **Mail.Read**. Keep **User.Read**, which new registrations normally include. Do not add `Mail.ReadWrite`, `Mail.Send`, or application permissions.
 5. Copy the app's **Application (client) ID** into `.env`. A client ID identifies the public app and is not a password:
 
@@ -169,10 +171,17 @@ For an RTX 4060 with 16 GB of system RAM, start with Qwen 3.5 9B. The Ollama dow
 ollama pull qwen3.5:9b
 ```
 
-3. Copy `pi-models.ollama.example.json` to `$env:USERPROFILE\.pi\agent\models.json`. If that destination already exists, merge the `ollama` provider into it instead of replacing it.
-4. Start Pi, run `/model`, and select **Qwen 3.5 9B (local)**.
+3. Configure Ollama for a 16K context, which prevents longer Organizer conversations from ending with a thinking-only response:
 
-The example deliberately advertises a 32K context and 4K maximum response. Although the model supports more, larger contexts consume substantial VRAM/RAM. Local inference has no per-token fee, but it is limited by hardware speed, electricity, storage, and model quality.
+```powershell
+[Environment]::SetEnvironmentVariable('OLLAMA_CONTEXT_LENGTH', '16384', 'User')
+```
+
+   Fully quit and reopen Ollama after changing it. On lower-memory systems, use `8192` instead.
+4. Copy `pi-models.ollama.example.json` to `$env:USERPROFILE\.pi\agent\models.json`. If that destination already exists, merge the `ollama` provider into it instead of replacing it. Keep its `contextWindow` equal to the Ollama setting.
+5. Start Pi, run `/model`, and select **Qwen 3.5 9B (local)**.
+
+The example uses a 16K context and 4K maximum response. Larger contexts consume substantial VRAM/RAM; if Ollama is left at its 4K default while Pi advertises a larger window, long chats can silently exhaust the real context before Pi compacts them. Local inference has no per-token fee, but it is limited by hardware speed, electricity, storage, and model quality.
 
 ## 5. Start Pi
 
@@ -253,7 +262,7 @@ The organizer includes a small mobile-friendly web interface that talks to Pi th
 
    Tailscale prints the private HTTPS address. Open that address from any signed-in device. On iPhone, use Safari's **Add to Home Screen** for an app-like shortcut.
 
-The web interface supports streaming replies, queued follow-up prompts, automatic history resynchronization, conversation reset/stop, and durable Pi extension confirmations across reconnects. It actively reconnects after a phone or laptop wakes from sleep, shows delivery state beneath outgoing messages, and preserves an unsent draft. If a reply ever appears stuck, use **Sync** in the header; syncing never resends an accepted prompt, so it cannot duplicate a calendar request. Calendar changes still require an explicit confirmation from the remote interface.
+The web interface supports streaming replies, queued follow-up prompts, automatic history resynchronization, conversation reset/stop, and durable Pi extension confirmations across reconnects. It actively reconnects after a phone or laptop wakes from sleep, preserves an unsent draft and in-flight message state, and tracks every message through accepted, running, completed, or failed. A thinking-only/context-limited response appears explicitly with a safe manual **Retry** option instead of disappearing. If a reply appears stuck, use **Sync** in the header; syncing never resends an accepted prompt, so it cannot duplicate a calendar request. Calendar changes still require an explicit confirmation from the remote interface.
 
 To launch the bridge without a visible terminal, run `scripts\start-remote-hidden.vbs` from its location in the repository. If you want it at sign-in, create a shortcut to that file in `shell:startup`; do not copy the VBS file out of the repository because it resolves the launcher relative to its own location.
 

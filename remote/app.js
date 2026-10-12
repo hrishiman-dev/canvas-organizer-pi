@@ -27,9 +27,12 @@ const pendingPrompts = new Map();
 const HEARTBEAT_STALE_MS = 40_000;
 const BACKGROUND_RECONNECT_MS = 10_000;
 const DRAFT_KEY = "organizer-remote-draft";
+const PENDING_KEY = "organizer-remote-pending-v1";
+const CAN_AUTOFOCUS = matchMedia("(hover: hover) and (pointer: fine)").matches;
 
-function scrollToBottom() {
-  messages.scrollTop = messages.scrollHeight;
+function scrollToBottom(force = false) {
+  const nearBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 140;
+  if (force || nearBottom) messages.scrollTop = messages.scrollHeight;
 }
 
 function clearEmpty() {
@@ -45,7 +48,7 @@ function bindSuggestions() {
 function showEmptyState() {
   const welcome = document.createElement("div");
   welcome.className = "empty-state";
-  welcome.innerHTML = `<h2>What do you need?</h2><p>Ask about Canvas, Outlook, your schedule, or add something to your calendar.</p><div class="suggestions" aria-label="Suggestions"><button type="button" data-prompt="What do I need to do today?">Today’s work</button><button type="button" data-prompt="Summarize recent Canvas announcements.">Announcements</button><button type="button" data-prompt="Scan my recent Outlook email for important future events. Show candidates, but do not add anything without my confirmation.">Outlook events</button><button type="button" data-prompt="What is on my calendar tomorrow?">Tomorrow</button></div>`;
+  welcome.innerHTML = `<p class="eyebrow">Canvas · Outlook · Calendar</p><h2>Your day, organized.</h2><p>Ask what’s due, find an important email, or change your calendar.</p><div class="suggestions" aria-label="Suggestions"><button type="button" data-prompt="What do I need to do today?">Today’s work</button><button type="button" data-prompt="Summarize recent Canvas announcements.">Announcements</button><button type="button" data-prompt="Scan my recent Outlook email for important future events. Show candidates, but do not add anything without my confirmation.">Outlook events</button><button type="button" data-prompt="What is on my calendar tomorrow?">Tomorrow</button></div>`;
   messages.append(welcome);
   bindSuggestions();
 }
@@ -69,7 +72,7 @@ function appendMessage(role, text = "", options = {}) {
     wrapper.append(status);
   }
   messages.append(wrapper);
-  scrollToBottom();
+  scrollToBottom(options.forceScroll);
   return bubble;
 }
 
@@ -93,6 +96,33 @@ function setPendingStatus(id, label, options = {}) {
     retry.addEventListener("click", () => retryPrompt(id));
     status.append(" · ", retry);
   }
+}
+
+function savePendingPrompts() {
+  try {
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify([...pendingPrompts.entries()]));
+  } catch {
+    // Delivery recovery still works for the current in-memory session.
+  }
+}
+
+function restorePendingPrompts() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(PENDING_KEY) || "[]");
+    for (const [id, pending] of saved) {
+      if (typeof id === "string" && typeof pending?.text === "string") pendingPrompts.set(id, pending);
+    }
+  } catch {
+    sessionStorage.removeItem(PENDING_KEY);
+  }
+}
+
+function finishPending(id) {
+  const wrapper = messages.querySelector(`[data-pending-id="${CSS.escape(id)}"]`);
+  wrapper?.classList.remove("pending", "accepted", "failed");
+  wrapper?.querySelector(".message-status")?.remove();
+  pendingPrompts.delete(id);
+  savePendingPrompts();
 }
 
 function setConnection(mode, label) {
@@ -120,12 +150,23 @@ function showToast(message) {
 }
 
 async function post(path, body = {}) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  let response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("The connection timed out. Tap Sync before retrying.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   const raw = await response.text();
   let value = {};
   try { value = raw ? JSON.parse(raw) : {}; } catch { value = { error: raw || "Unreadable server response" }; }
@@ -139,7 +180,8 @@ async function sendPrompt(text) {
   const pendingId = crypto.randomUUID();
   const requestId = `prompt-${pendingId}`;
   pendingPrompts.set(pendingId, { text: message, requestId, status: "Sending…", acceptedAt: 0, syncRequested: false });
-  appendMessage("user", message, { pendingId, status: "Sending…" });
+  savePendingPrompts();
+  appendMessage("user", message, { pendingId, status: "Sending…", forceScroll: true });
   promptInput.value = "";
   saveDraft();
   resizeComposer();
@@ -153,17 +195,19 @@ async function sendPrompt(text) {
       pending.status = "Accepted — waiting for Pi…";
       pending.acceptedAt = Date.now();
       setPendingStatus(pendingId, pending.status, { accepted: true });
+      savePendingPrompts();
     }
   } catch (error) {
     const pending = pendingPrompts.get(pendingId);
     if (pending) pending.status = "Delivery not confirmed — tap Sync";
     setPendingStatus(pendingId, "Delivery not confirmed — tap Sync", { failed: true });
+    savePendingPrompts();
     setWorking(false);
     showToast(`Could not confirm delivery: ${error.message}`);
   } finally {
     posting = false;
     resizeComposer();
-    promptInput.focus();
+    if (CAN_AUTOFOCUS) promptInput.focus({ preventScroll: true });
   }
 }
 
@@ -171,6 +215,7 @@ function retryPrompt(id) {
   const pending = pendingPrompts.get(id);
   if (!pending) return;
   pendingPrompts.delete(id);
+  savePendingPrompts();
   messages.querySelector(`[data-pending-id="${CSS.escape(id)}"]`)?.remove();
   sendPrompt(pending.text);
 }
@@ -204,23 +249,32 @@ function extractText(message) {
 
 function renderHistory(records) {
   const useful = (records || []).filter((message) => message?.role === "user" || message?.role === "assistant");
-  const unmatchedUserTexts = useful.filter((message) => message.role === "user").map(extractText);
-  for (const [id, pending] of pendingPrompts) {
-    const index = unmatchedUserTexts.indexOf(pending.text);
-    if (index >= 0) {
-      pendingPrompts.delete(id);
-      unmatchedUserTexts.splice(index, 1);
-    }
-  }
+  const matchedPending = new Set();
   messages.replaceChildren();
   assistantBubble = null;
   for (const message of useful) {
     const text = extractText(message);
-    if (text) appendMessage(message.role, text);
+    if (!text) continue;
+    const match = message.role === "user"
+      ? [...pendingPrompts.entries()].find(([id, pending]) => !matchedPending.has(id) && pending.text === text)
+      : null;
+    if (match) {
+      const [id, pending] = match;
+      matchedPending.add(id);
+      appendMessage("user", text, { pendingId: id, status: pending.status });
+      setPendingStatus(id, pending.status, {
+        accepted: pending.acceptedAt > 0,
+        failed: pending.status.includes("not confirmed") || pending.status.includes("No reply") || pending.status.includes("failed"),
+        retry: Boolean(pending.retrySafe),
+      });
+    } else {
+      appendMessage(message.role, text);
+    }
   }
   for (const [id, pending] of pendingPrompts) {
+    if (matchedPending.has(id)) continue;
     appendMessage("user", pending.text, { pendingId: id, status: pending.status });
-    setPendingStatus(id, pending.status, { accepted: pending.acceptedAt > 0, failed: pending.status.includes("not confirmed") });
+    setPendingStatus(id, pending.status, { accepted: pending.acceptedAt > 0, failed: pending.status.includes("not confirmed") || pending.status.includes("No reply") || pending.status.includes("failed"), retry: Boolean(pending.retrySafe) });
   }
   if (!messages.children.length) showEmptyState();
   scrollToBottom();
@@ -229,6 +283,7 @@ function renderHistory(records) {
 function clearConversation() {
   messages.replaceChildren();
   pendingPrompts.clear();
+  savePendingPrompts();
   assistantBubble = null;
   showEmptyState();
 }
@@ -272,14 +327,40 @@ function handleRecord(record) {
     if (record.error) showToast(record.error);
     return;
   }
+  if (record.type === "bridge_prompt_status") {
+    const id = record.clientId;
+    const pending = pendingPrompts.get(id);
+    if (!pending) return;
+    const labels = {
+      accepted: "Sent to Organizer…",
+      acknowledged: "Delivered to Pi…",
+      running: "Pi is working…",
+      failed: "Delivery failed",
+      empty: record.reason === "context_limit"
+        ? "No reply — the model ran out of context"
+        : record.reason === "action_completed_without_text"
+          ? "The action finished, but Pi gave no written reply"
+          : "No visible reply was produced",
+    };
+    if (record.status === "completed") {
+      finishPending(id);
+      return;
+    }
+    pending.status = labels[record.status] || pending.status;
+    pending.retrySafe = Boolean(record.retrySafe);
+    if (record.status === "accepted" || record.status === "acknowledged" || record.status === "running") pending.acceptedAt ||= record.updatedAt || Date.now();
+    setPendingStatus(id, pending.status, {
+      accepted: ["accepted", "acknowledged", "running"].includes(record.status),
+      failed: ["failed", "empty"].includes(record.status),
+      retry: pending.retrySafe,
+    });
+    savePendingPrompts();
+    if (record.status === "empty" && record.retrySafe) showToast("Pi ended without a reply. You can safely retry this message.");
+    if (record.status === "failed") setWorking(false);
+    return;
+  }
   if (record.type === "agent_start") {
     assistantBubble = null;
-    for (const [id, pending] of pendingPrompts) {
-      if (pending.acceptedAt) {
-        pending.status = "Pi is working…";
-        setPendingStatus(id, pending.status, { accepted: true });
-      }
-    }
     setWorking(true, "Thinking…");
     return;
   }
@@ -345,6 +426,11 @@ function handleRecord(record) {
       }
       setWorking(true, "Message queued — Pi is finishing the current response…");
       showToast("Message queued.");
+    } else if (match) {
+      match.pending.status = "Delivered to Pi…";
+      match.pending.acceptedAt ||= Date.now();
+      setPendingStatus(match.id, match.pending.status, { accepted: true });
+      savePendingPrompts();
     }
     return;
   }
@@ -487,7 +573,8 @@ setInterval(() => {
 }, 5_000);
 
 restoreDraft();
+restorePendingPrompts();
 bindSuggestions();
 resizeComposer();
 connectEvents();
-promptInput.focus();
+if (CAN_AUTOFOCUS) promptInput.focus({ preventScroll: true });

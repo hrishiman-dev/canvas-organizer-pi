@@ -14,7 +14,7 @@
           "name": "Qwen 3.5 9B (local)",
           "reasoning": true,
           "input": ["text"],
-          "contextWindow": 32768,
+          "contextWindow": 16384,
           "maxTokens": 4096,
           "cost": {
             "input": 0,

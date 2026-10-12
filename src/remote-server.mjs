@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { classifyAgentEnd } from "./remote-protocol.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const publicRoot = join(projectRoot, "remote");
@@ -16,11 +17,49 @@ const heartbeatMs = boundedInterval(process.env.ORGANIZER_HEARTBEAT_MS || "15000
 const clients = new Map();
 const pendingUiRequests = new Map();
 const outboundQueue = [];
+const promptQueue = [];
+const promptRequests = new Map();
 let piProcess = null;
 let piBuffer = "";
 let piState = "stopped";
 let piError = null;
 let piSpawned = false;
+let activePromptId = null;
+
+const terminalPromptStates = new Set(["completed", "empty", "failed"]);
+
+function publicPromptStatus(request) {
+  return {
+    type: "bridge_prompt_status",
+    id: request.id,
+    clientId: request.clientId,
+    status: request.status,
+    reason: request.reason || null,
+    retrySafe: Boolean(request.retrySafe),
+    updatedAt: request.updatedAt,
+  };
+}
+
+function setPromptStatus(id, status, details = {}) {
+  const request = promptRequests.get(id);
+  if (!request) return;
+  Object.assign(request, details, { status, updatedAt: Date.now() });
+  broadcast(publicPromptStatus(request));
+  console.log(`[remote] Prompt ${id} is ${status}${request.reason ? ` (${request.reason})` : ""}.`);
+  prunePromptRequests();
+}
+
+function prunePromptRequests() {
+  const cutoff = Date.now() - 30 * 60_000;
+  for (const [id, request] of promptRequests) {
+    if (terminalPromptStates.has(request.status) && request.updatedAt < cutoff) promptRequests.delete(id);
+  }
+  while (promptRequests.size > 200) {
+    const oldestTerminal = [...promptRequests].find(([, request]) => terminalPromptStates.has(request.status))?.[0];
+    if (!oldestTerminal) break;
+    promptRequests.delete(oldestTerminal);
+  }
+}
 
 function loadEnv(path) {
   if (!existsSync(path)) return;
@@ -113,6 +152,7 @@ function ensurePi() {
     piSpawned = false;
     outboundQueue.length = 0;
     pendingUiRequests.clear();
+    failOpenPrompts("pi_start_failed");
     setPiState("error", `Could not start Pi. Set PI_COMMAND to the exact Pi executable path. (${error.message})`);
   });
   child.once("exit", (code, signal) => {
@@ -120,6 +160,7 @@ function ensurePi() {
     piSpawned = false;
     outboundQueue.length = 0;
     pendingUiRequests.clear();
+    failOpenPrompts("pi_exited");
     setPiState("stopped", code === 0 ? null : `Pi exited${code == null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}.`);
   });
   child.stdout.on("data", (chunk) => consumePiOutput(chunk));
@@ -128,6 +169,14 @@ function ensurePi() {
     if (message) process.stderr.write(`[pi] ${message}\n`);
   });
   return child;
+}
+
+function failOpenPrompts(reason) {
+  for (const request of promptRequests.values()) {
+    if (!terminalPromptStates.has(request.status)) setPromptStatus(request.id, "failed", { reason, retrySafe: true });
+  }
+  promptQueue.length = 0;
+  activePromptId = null;
 }
 
 function consumePiOutput(chunk) {
@@ -145,13 +194,33 @@ function consumePiOutput(chunk) {
         pendingUiRequests.set(record.id, record);
       }
       broadcast(record);
-      if (record.type === "agent_start") setPiState("working");
+      if (record.type === "agent_start") {
+        setPiState("working");
+        if (!activePromptId) {
+          while (promptQueue.length && !activePromptId) {
+            const candidate = promptQueue.shift();
+            const request = promptRequests.get(candidate);
+            if (request && !terminalPromptStates.has(request.status)) activePromptId = candidate;
+          }
+        }
+        if (activePromptId) setPromptStatus(activePromptId, "running");
+      }
+      if (record.type === "agent_end" && activePromptId) {
+        const classification = classifyAgentEnd(record);
+        setPromptStatus(activePromptId, classification.status, classification);
+        if (classification.status !== "running") activePromptId = null;
+      }
       if (record.type === "agent_settled") {
         setPiState("ready");
         sendToPi({ id: `settled-history-${randomUUID()}`, type: "get_messages" });
       }
-      if (record.type === "response" && record.command === "prompt" && record.data?.disposition === "handled") {
-        sendToPi({ id: `handled-history-${randomUUID()}`, type: "get_messages" });
+      if (record.type === "response" && record.command === "prompt") {
+        if (record.success) setPromptStatus(record.id, "acknowledged");
+        else {
+          setPromptStatus(record.id, "failed", { reason: "pi_rejected", retrySafe: true });
+          const index = promptQueue.indexOf(record.id);
+          if (index >= 0) promptQueue.splice(index, 1);
+        }
       }
     } catch {
       process.stderr.write("[pi] Ignored a non-JSON RPC output line.\n");
@@ -163,9 +232,10 @@ function sendToPi(record) {
   const child = ensurePi();
   if (!piSpawned || !child.stdin?.writable) {
     outboundQueue.push(record);
-    return;
+    return "queued";
   }
   child.stdin.write(`${JSON.stringify(record)}\n`);
+  return "sent";
 }
 
 function securityHeaders(extra = {}) {
@@ -221,6 +291,9 @@ const server = createServer(async (request, response) => {
       response.write(`data: ${JSON.stringify({ type: "bridge_status", state: piState, error: piError })}\n\n`);
       const id = randomUUID();
       clients.set(id, response);
+      for (const request of promptRequests.values()) {
+        response.write(`data: ${JSON.stringify(publicPromptStatus(request))}\n\n`);
+      }
       for (const pending of pendingUiRequests.values()) {
         response.write(`data: ${JSON.stringify(pending)}\n\n`);
       }
@@ -245,9 +318,22 @@ const server = createServer(async (request, response) => {
       if (!message || message.length > 8_000) return json(response, 400, { error: "Message must contain 1–8,000 characters." });
       const clientId = typeof body.clientId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(body.clientId) ? body.clientId : randomUUID();
       const requestId = `prompt-${clientId}`;
-      sendToPi({ id: requestId, type: "prompt", message, streamingBehavior: "followUp" });
+      if (promptRequests.has(requestId) && !terminalPromptStates.has(promptRequests.get(requestId).status)) {
+        return json(response, 409, { error: "That message is already being handled.", requestId });
+      }
+      promptRequests.set(requestId, {
+        id: requestId,
+        clientId,
+        status: "accepted",
+        reason: null,
+        retrySafe: false,
+        updatedAt: Date.now(),
+      });
+      promptQueue.push(requestId);
+      const delivery = sendToPi({ id: requestId, type: "prompt", message, streamingBehavior: "followUp" });
+      broadcast(publicPromptStatus(promptRequests.get(requestId)));
       console.log(`[remote] Accepted prompt ${requestId}; state=${piState}.`);
-      return json(response, 202, { accepted: true, requestId });
+      return json(response, 202, { accepted: true, requestId, delivery });
     }
     if (request.method === "POST" && url.pathname === "/api/sync") {
       if (piProcess && !piProcess.killed) {
