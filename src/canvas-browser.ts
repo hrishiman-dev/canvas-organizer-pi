@@ -202,9 +202,9 @@ async function launchDedicatedBrowser(baseUrl: string, headless: boolean): Promi
   const child = spawn(browserPath, args, { detached: true, stdio: "ignore", windowsHide: headless });
   child.unref();
   const runtime: BrowserRuntime = { baseUrl, browserPath, port, pid: child.pid ?? 0, headless };
+  await waitForEndpoint(port);
   mkdirSync(APP_DIR, { recursive: true });
   writeFileSync(RUNTIME_FILE, JSON.stringify(runtime, null, 2), { encoding: "utf8", mode: 0o600 });
-  await waitForEndpoint(port);
   return runtime;
 }
 

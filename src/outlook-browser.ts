@@ -158,15 +158,16 @@ async function launchDedicatedBrowser(headless: boolean): Promise<BrowserRuntime
     "--profile-directory=Default",
     "--no-first-run",
     "--no-default-browser-check",
+    "--disable-background-mode",
   ];
   if (headless) args.push("--headless=new", "--disable-gpu");
   args.push(START_URL);
   const child = spawn(browserPath, args, { detached: true, stdio: "ignore", windowsHide: headless });
   child.unref();
   const runtime = { browserPath, port, pid: child.pid ?? 0, headless };
+  await waitForEndpoint(port);
   mkdirSync(APP_DIR, { recursive: true });
   writeFileSync(RUNTIME_FILE, JSON.stringify(runtime, null, 2), { encoding: "utf8", mode: 0o600 });
-  await waitForEndpoint(port);
   return runtime;
 }
 
